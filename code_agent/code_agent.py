@@ -24,6 +24,11 @@ class CodeState(TypedDict):
     messages: Annotated[list, add_messages]
     target_product: str       # 用户最终想得到什么，例如 Python 脚本、函数、类、API、网页、配置文件等
     user_query: str          # 用户原始需求
+    technical_constraints: str # 技术约束，例如语言、框架、库、运行环境等，没有则写“未指定”
+    input_info: str          # 代码需要接收什么输入，没有则写“未指定”
+    output_info: str         # 代码需要产生什么输出，没有则写“未
+    function_points: list[str]  # 列出核心功能要点
+    clarifying_questions: list[str]  # 影响实现的关键问题，没有则写“无”
     understanding: str       # 对用户需求的理解
     assumptions: list[str]   # 模型做出的合理假设
     dependencies: list[str]  # 需要安装的依赖
@@ -45,8 +50,6 @@ class Understanding(BaseModel):
     clarifying_questions: list[str] = Field(default_factory=list, description="影响实现的关键问题，没有则写“无”")
 
 class PythonCodeOutput(BaseModel):
-    understanding: str = Field(description="用一句话总结用户想要实现什么")
-    assumptions: list[str] = Field(default_factory=list, description="合理假设")
     dependencies: list[str] = Field(default_factory=list, description="需要安装的第三方库")
     python_code: str = Field(description="完整、可运行的 Python 代码")
     run_command: str = Field(default="python main.py", description="运行代码的命令")
@@ -111,7 +114,6 @@ def understand_query_node(state: CodeState) -> CodeState:
       f"待澄清问题：{', '.join(response.clarifying_questions) if response.clarifying_questions else '无'}"
     )
 
-    print(f"🔍 理解阶段输出:\n{response_text}\n")
 
     return {
       "understanding": response.understanding,
@@ -119,54 +121,90 @@ def understand_query_node(state: CodeState) -> CodeState:
       "assumptions": response.assumptions,
       "step": "understood",
       "target_product": response.target_product, 
-      "messages": [AIMessage(content=f"我理解您的需求：\n{response_text}")]
-       
+      "messages": [AIMessage(content=f"我理解您的需求：\n{response_text}")],
+      "input_info": response.input_info,
+      "output_info": response.output_info,
+      "technical_constraints": response.technical_constraints,
+      "function_points": response.function_points,
+      "clarifying_questions": response.clarifying_questions,
         }
 
 
-
-def generate_answer_node(state: CodeState) -> CodeState:
-    """步骤3：基于搜索结果生成最终答案"""
-    
-    # 检查是否有搜索结果
-    if state["step"] == "search_failed":
-        # 如果搜索失败，基于LLM知识回答
-        fallback_prompt = f"""搜索API暂时不可用，请基于您的知识回答用户的问题：
-
-用户问题：{state['user_query']}
-
-请提供一个有用的回答，并说明这是基于已有知识的回答。"""
-        
-        response = llm.invoke([SystemMessage(content=fallback_prompt)])
-        
-        return {
-            "final_answer": response.content,
-            "step": "completed",
-            "messages": [AIMessage(content=response.content)]
-        }
-    
-    # 基于搜索结果生成答案
-    answer_prompt = f"""基于以下搜索结果为用户提供完整、准确的答案：
-
-用户问题：{state['user_query']}
-
-搜索结果：
-{state['search_results']}
-
-请要求：
-1. 综合搜索结果，提供准确、有用的回答
-2. 如果是技术问题，提供具体的解决方案或代码
-3. 引用重要信息的来源
-4. 回答要结构清晰、易于理解
-5. 如果搜索结果不够完整，请说明并提供补充建议"""
-
-    response = llm.invoke([SystemMessage(content=answer_prompt)])
-    
-    return {
-        "final_answer": response.content,
-        "step": "completed",
-        "messages": [AIMessage(content=response.content)]
+def code_generation_node(state: CodeState) -> CodeState:
+    """步骤2：基于理解生成Python代码"""
+    code_prompt = f"""请根据以下需求说明生成完整、可运行的 Python 代码：
+    用户需求：{state['user_query']}，
+    理解：{state['understanding']}，
+    目标产物：{state['target_product']}
+    技术约束：{state['technical_constraints']}，
+    输入信息：{state['input_info']}，
+    输出信息：{state['output_info']}，
+    功能要点：{', '.join(state['function_points']) if state['function_points'] else '无'}，
+    合理假设：{', '.join(state['assumptions']) if state['assumptions'] else '无'}，
+    待澄清问题：{', '.join(state['clarifying_questions']) if state['clarifying_questions'] else '无'}"""
+    structured_code_llm = llm.with_structured_output(
+      PythonCodeOutput,
+      method="function_calling")
+    response: PythonCodeOutput = structured_code_llm.invoke([
+      SystemMessage(content=code_prompt)
+    ])
+    response_text = (
+      f"依赖：{', '.join(response.dependencies) if response.dependencies else '无'}\n" 
+      f"代码：\n{response.python_code}\n"
+      f"运行命令：{response.run_command}\n"
+      f"补充说明：{response.notes}"
+    )             
+    return{
+        "dependencies": response.dependencies,
+        "python_code": response.python_code,
+        "run_command": response.run_command,
+        "notes": response.notes,
+        "step": "code_generated",
+        "messages": [AIMessage(content=f"我生成了代码：\n{response_text}")]
     }
+
+# def generate_answer_node(state: CodeState) -> CodeState:
+#     """步骤3：基于搜索结果生成最终答案"""
+    
+#     # 检查是否有搜索结果
+#     if state["step"] == "search_failed":
+#         # 如果搜索失败，基于LLM知识回答
+#         fallback_prompt = f"""搜索API暂时不可用，请基于您的知识回答用户的问题：
+
+# 用户问题：{state['user_query']}
+
+# 请提供一个有用的回答，并说明这是基于已有知识的回答。"""
+        
+#         response = llm.invoke([SystemMessage(content=fallback_prompt)])
+        
+#         return {
+#             "final_answer": response.content,
+#             "step": "completed",
+#             "messages": [AIMessage(content=response.content)]
+#         }
+    
+#     # 基于搜索结果生成答案
+#     answer_prompt = f"""基于以下搜索结果为用户提供完整、准确的答案：
+
+# 用户问题：{state['user_query']}
+
+# 搜索结果：
+# {state['search_results']}
+
+# 请要求：
+# 1. 综合搜索结果，提供准确、有用的回答
+# 2. 如果是技术问题，提供具体的解决方案或代码
+# 3. 引用重要信息的来源
+# 4. 回答要结构清晰、易于理解
+# 5. 如果搜索结果不够完整，请说明并提供补充建议"""
+
+#     response = llm.invoke([SystemMessage(content=answer_prompt)])
+    
+#     return {
+#         "final_answer": response.content,
+#         "step": "completed",
+#         "messages": [AIMessage(content=response.content)]
+#     }
 
 # 构建搜索工作流
 def create_search_assistant():
@@ -269,8 +307,9 @@ if __name__ == "__main__":
         }
 
         result = understand_query_node(state)
-
+        code  = code_generation_node(result)
         print("返回结果：", result)
+        print("生成的代码：", code["python_code"])
 
         assert result["step"] == "understood"
         assert result["user_query"] == "写一个 Python 函数，判断字符串是否是回文"

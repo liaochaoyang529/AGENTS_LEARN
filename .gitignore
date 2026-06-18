@@ -5,5 +5,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .env
-.env.*
-/learn_repos/
+.env.local
+.env copy
+.env example
+*.db
+memory_data/
